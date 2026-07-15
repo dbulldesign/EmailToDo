@@ -151,6 +151,13 @@
   .person-link:hover{color:var(--accent);text-decoration:underline}
   .people{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
   .people-lbl{font-family:ui-sans-serif,system-ui,sans-serif;font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft)}
+  /* expandable body preview */
+  .preview{
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    font-size:13px;line-height:1.55;color:var(--ink);white-space:pre-wrap;word-break:break-word;
+    margin-top:10px;padding:11px 13px;border:1px solid var(--line);border-radius:10px;
+    background:var(--paper);max-height:260px;overflow:auto;
+  }
   .open{
     font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;font-weight:600;
     color:var(--accent);text-decoration:none;border:1px solid var(--accent-soft);
@@ -337,8 +344,9 @@ From: Marketing"></textarea>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const CHANGELOG = {
+  "1.6.0": "Preview an email's body inline, and tag every From + Cc person",
   "1.5.0": "Tag people from From/Cc for one-click search; clearer help when new Outlook drags aren't readable",
   "1.4.0": "Global search across every field — PO, project, person, or any text in an email",
   "1.3.0": "Move an email to another project (and it stays put through re-sorts)",
@@ -355,7 +363,7 @@ db.version(2).stores({ tasks: "id", meta: "key", rules: "id" });
 const PALETTE = ["#2f5d50","#c2543a","#3a5a8c","#8a6d3b","#6a4c93","#2c7873","#a63d57","#5b6b3a"];
 let projectColors = {};
 
-const state = { tasks: [], filter: "open", q: "" };
+const state = { tasks: [], filter: "open", q: "", expanded: new Set() };
 
 // ---------- keyword → project detection ----------
 const STOP = new Set(("re fwd fw the a an and or to of in on for your you our we with at is are be this that new please pls hi hello thanks thank regards update re: fw: fwd: report meeting call email mail message request").split(" "));
@@ -862,23 +870,29 @@ function personChip(p, cls){
 function taskHTML(t){
   const link = t.webLink || outlookSearchLink(t);
   const date = t.date ? new Date(t.date).toLocaleDateString(undefined,{month:"short",day:"numeric"}) : "";
-  const sender = t.sender ? parsePeople(t.sender)[0] : null;
-  // people to tag: sender (From) + everyone on Cc, de-duplicated
-  const cc = parsePeople(t.cc);
-  const seen = new Set(sender ? [(sender.email||sender.name||"").toLowerCase()] : []);
-  const ccUnique = cc.filter(p=>{ const k=(p.email||p.name||"").toLowerCase(); if(!k||seen.has(k)) return false; seen.add(k); return true; });
+  // tag everyone: From people first, then Cc, de-duplicated across both
+  const seen = new Set();
+  const dedup = arr => arr.filter(p=>{ const k=(p.email||p.name||"").toLowerCase(); if(!k||seen.has(k)) return false; seen.add(k); return true; });
+  const from = dedup(parsePeople(t.sender));
+  const cc   = dedup(parsePeople(t.cc));
+  const hasBody = !!(t.body && t.body.trim());
+  const expanded = state.expanded.has(t.id);
   return `<div class="task ${t.done?"done":""}" data-id="${t.id}">
     <input type="checkbox" class="box" ${t.done?"checked":""} data-check="${t.id}" aria-label="Mark done"/>
     <div class="body">
       <span class="subj">${esc(t.subject)}</span>
       <div class="meta">
-        ${sender?`<button class="sender person-link" data-find="${esc(sender.name||sender.email)}" title="Search this person">${esc(sender.name||sender.email)}</button>`:""}
-        ${date?`<span>· ${date}</span>`:""}
+        ${date?`<span>${date}</span>`:""}
         ${t.po?`<button class="tag po" data-find="${esc("PO "+t.po)}" title="Show every email for this PO">PO ${esc(t.po)}</button>`:""}
         ${t.tracking?`<a class="tag ship" href="${esc(trackingUrl(t.tracking))}" target="_blank" rel="noopener" title="Track this shipment">📦 ${esc(t.tracking)} ↗</a>`:""}
       </div>
-      ${ccUnique.length?`<div class="people"><span class="people-lbl">Cc</span>${ccUnique.map(p=>personChip(p)).join("")}</div>`:""}
+      ${from.length||cc.length?`<div class="people">
+        ${from.length?`<span class="people-lbl">From</span>${from.map(p=>personChip(p)).join("")}`:""}
+        ${cc.length?`<span class="people-lbl">Cc</span>${cc.map(p=>personChip(p)).join("")}`:""}
+      </div>`:""}
+      ${hasBody&&expanded?`<div class="preview">${esc(t.body)}</div>`:""}
     </div>
+    ${hasBody?`<button class="mv exp" data-expand="${t.id}" title="${expanded?"Hide":"Show"} the email body">${expanded?"Hide":"Preview"}</button>`:""}
     <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook web">Open ↗</a>
     <button class="mv" data-move="${t.id}" title="Move to another project">Move</button>
     <button class="del" data-del="${t.id}" title="Remove">×</button>
@@ -1035,6 +1049,13 @@ document.getElementById("list").addEventListener("click", async e=>{
     const qEl = document.getElementById("q");
     qEl.value = val; state.q = val; render();
     qEl.scrollIntoView({block:"nearest"});
+    return;
+  }
+  const exp = e.target.closest("[data-expand]");
+  if(exp){
+    const id = exp.dataset.expand;
+    if(state.expanded.has(id)) state.expanded.delete(id); else state.expanded.add(id);
+    render();
     return;
   }
   const mv = e.target.closest("[data-move]");
