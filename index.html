@@ -202,7 +202,7 @@
 
   <div class="drop" id="drop">
     <div class="big">Drag emails here</div>
-    <div class="small">Drop one or many <b>.msg</b> files, or a whole selection from Outlook on the web — or <span class="paste-link" id="pasteOpen">paste emails instead</span></div>
+    <div class="small">Works with <b>classic</b> and <b>new</b> Outlook — drop one or many emails at once, or <span class="paste-link" id="pasteOpen">paste them instead</span></div>
   </div>
 
   <div class="toolbar">
@@ -540,7 +540,8 @@ if(!canAutosave){ document.getElementById("btnLink").style.display="none"; }
 // ---------- parse pasted / dropped email text ----------
 // Split a blob of text into one chunk per email, using the most reliable
 // signal available: blank lines, then repeated "Subject:" headers, then
-// (only when there are no header markers at all) one email per line.
+// columned list rows. A single email spread over several prose lines must
+// stay ONE chunk, so we never split on bare newlines alone.
 function splitEmails(text){
   const norm = (text||"").replace(/\r\n?/g,"\n").trim();
   if(!norm) return [];
@@ -550,10 +551,10 @@ function splitEmails(text){
   // B) one run of text with repeated "Subject:" lines → split at each new message
   const bySubject = norm.split(/\n(?=[ \t]*subject[ \t]*:)/i).map(b=>b.trim()).filter(Boolean);
   if(bySubject.length > 1) return bySubject;
-  // C) several plain rows and no header markers → treat each line as its own email
+  // C) columned list rows (tab / 2+ space gaps on EVERY line) → one email per row.
+  //    Requiring every line to be columned keeps ordinary prose emails as one chunk.
   const lines = norm.split("\n").map(l=>l.trim()).filter(Boolean);
-  const hasHeaders = lines.some(l=>/^(subject|from|to|cc|sent|date|received)[ \t]*:/i.test(l));
-  if(lines.length > 1 && !hasHeaders) return lines;
+  if(lines.length > 1 && lines.every(l=>/\t|\S {2,}\S/.test(l))) return lines;
   // D) a single email
   return [norm];
 }
@@ -586,26 +587,36 @@ function parseBlock(block){
   return makeTask({subject, sender, to, cc, date});
 }
 
-// Extract emails from dropped HTML (Outlook on the web hands over a table/list).
-function parseEmailHtml(html){
-  let doc;
-  try{ doc = new DOMParser().parseFromString(html, "text/html"); }
-  catch(e){ return []; }
+function htmlToDoc(html){
+  try{ return new DOMParser().parseFromString(html, "text/html"); }
+  catch(e){ return null; }
+}
+function htmlToText(html){
+  const doc = htmlToDoc(html);
+  return doc && doc.body ? doc.body.textContent.replace(/\n{3,}/g,"\n\n").trim() : "";
+}
+
+// Look for a MULTI-message list inside dropped HTML (Outlook on the web hands
+// over a table/list when you drag a selection). Returns [] when the HTML is
+// just a single message body — the caller then treats it as one email.
+function parseEmailListHtml(html){
+  const doc = htmlToDoc(html);
+  if(!doc) return [];
+  const looksListy = els =>
+    els.length > 1 && els.length <= 500 &&
+    els.every(el=>{ const len = el.textContent.trim().length; return len > 0 && len <= 300; });
   // a table where each row is a message
   const rows = [...doc.querySelectorAll("tr")].filter(tr=>tr.textContent.trim());
-  if(rows.length){
-    const tasks = rows.map(tr=>{
+  if(looksListy(rows)){
+    return rows.map(tr=>{
       const cells = [...tr.querySelectorAll("td,th")].map(c=>c.textContent.trim()).filter(Boolean);
       return parseBlock(cells.length ? cells.join("\t") : tr.textContent.trim());
     }).filter(Boolean);
-    if(tasks.length) return tasks;
   }
   // a list where each item is a message
   const items = [...doc.querySelectorAll("li")].filter(li=>li.textContent.trim());
-  if(items.length > 1) return items.map(li=>parseBlock(li.textContent.trim())).filter(Boolean);
-  // otherwise fall back to the flattened text
-  const text = (doc.body ? doc.body.textContent : "") || "";
-  return splitEmails(text).map(parseBlock).filter(Boolean);
+  if(looksListy(items)) return items.map(li=>parseBlock(li.textContent.trim())).filter(Boolean);
+  return [];
 }
 
 function parsePaste(text){ return splitEmails(text).map(parseBlock).filter(Boolean); }
@@ -613,25 +624,55 @@ function parsePaste(text){ return splitEmails(text).map(parseBlock).filter(Boole
 // ---------- parse .msg ----------
 async function parseMsgFile(file){
   const buf = await file.arrayBuffer();
-  try{
-    const reader = new MSGReader(buf);
-    const d = reader.getFileData();
-    const recips = Array.isArray(d.recipients) ? d.recipients : [];
-    const fmt = r => (r.name ? r.name : "") + (r.email ? ` <${r.email}>` : "");
-    // recipType: 1 = To, 2 = Cc, 3 = Bcc (fallbacks handle missing types)
-    const cc = recips.filter(r=>r.recipType===2).map(fmt).join("; ");
-    const to = recips.filter(r=>r.recipType===1 || r.recipType==null).map(fmt).join("; ");
-    return makeTask({
-      subject: d.subject,
-      sender: d.senderName ? `${d.senderName}${d.senderEmail?` <${d.senderEmail}>`:""}` : d.senderEmail,
-      date: d.messageDeliveryTime || d.clientSubmitTime || null,
-      cc, to,
-      body: (d.body || "").slice(0, 4000)
-    });
-  }catch(e){
-    // fall back to filename
-    return makeTask({subject: file.name.replace(/\.msg$/i,"")});
+  const reader = new MSGReader(buf);
+  const d = reader.getFileData();
+  const recips = Array.isArray(d.recipients) ? d.recipients : [];
+  const fmt = r => (r.name ? r.name : "") + (r.email ? ` <${r.email}>` : "");
+  // recipType: 1 = To, 2 = Cc, 3 = Bcc (fallbacks handle missing types)
+  const cc = recips.filter(r=>r.recipType===2).map(fmt).join("; ");
+  const to = recips.filter(r=>r.recipType===1 || r.recipType==null).map(fmt).join("; ");
+  return makeTask({
+    subject: d.subject,
+    sender: d.senderName ? `${d.senderName}${d.senderEmail?` <${d.senderEmail}>`:""}` : d.senderEmail,
+    date: d.messageDeliveryTime || d.clientSubmitTime || null,
+    cc, to,
+    body: (d.body || "").slice(0, 4000)
+  });
+}
+
+// Handle any dropped file. New Outlook doesn't always drop a clean ".msg":
+// files may be .msg, .eml, plain text, or arrive with no/odd extension.
+async function parseDroppedFile(file){
+  const name = (file.name || "").trim();
+  // .msg (or looks like one) → binary parser, with graceful fallbacks
+  if(/\.msg$/i.test(name) || file.type==="application/vnd.ms-outlook"){
+    try{ return [await parseMsgFile(file)]; }
+    catch(e){ /* fall through to text / filename */ }
   }
+  // text-ish files (.eml, .txt, exported messages) → parse as email text
+  if(/\.(eml|txt|mime)$/i.test(name) || /^text\//.test(file.type||"") ||
+     file.type==="message/rfc822" || !name){
+    try{
+      const text = await file.text();
+      const tasks = splitEmails(text).map(parseBlock).filter(Boolean);
+      if(tasks.length) return tasks;
+    }catch(e){ /* fall through */ }
+  }
+  // last resort: use the filename (minus extension) as the subject
+  const subj = name.replace(/\.[a-z0-9]+$/i,"").trim();
+  return subj ? [makeTask({subject: subj})] : [];
+}
+
+// Gather dropped files from both the classic list and the item API.
+function collectFiles(dt){
+  const out = [];
+  for(const f of (dt.files||[])) out.push(f);
+  if(!out.length && dt.items){
+    for(const it of dt.items){
+      if(it.kind === "file"){ const f = it.getAsFile(); if(f) out.push(f); }
+    }
+  }
+  return out;
 }
 
 // ---------- render ----------
@@ -705,26 +746,56 @@ const drop = document.getElementById("drop");
 drop.addEventListener("drop", async ev=>{
   ev.preventDefault(); drop.classList.remove("hot");
   const dt = ev.dataTransfer;
-  const files = [...(dt.files||[])].filter(f=>/\.msg$/i.test(f.name));
+
+  // Read every string payload synchronously — dataTransfer is emptied after
+  // the first await, and new Outlook may put the email under any of these.
+  const data = {};
+  for(const type of (dt.types||[])){
+    if(type === "Files") continue;
+    try{ data[type] = dt.getData(type); }catch(e){}
+  }
+  const files = collectFiles(dt);
+
+  // 1) dropped files (classic Outlook .msg, saved .eml, new Outlook file drags)
   if(files.length){
     const tasks = [];
-    for(const f of files){ tasks.push(await parseMsgFile(f)); }
-    await addTasks(tasks);
-    return;
+    for(const f of files){ tasks.push(...await parseDroppedFile(f)); }
+    const clean = tasks.filter(Boolean);
+    if(clean.length){ await addTasks(clean); return; }
   }
-  // new/web Outlook drops text, html, or a url — any of which may hold several emails
-  const html = dt.getData("text/html");
-  const text = dt.getData("text/plain");
-  const uri  = dt.getData("text/uri-list");
+
+  // 2) HTML/text/uri payloads — any of which may hold one or several emails
+  const html = data["text/html"];
+  const text = data["text/plain"];
+  const uri  = data["text/uri-list"] || data["text/x-moz-url"] || data["URL"];
   let tasks = [];
-  if(html && html.trim()) tasks = parseEmailHtml(html);
+
+  // a multi-message list from Outlook on the web / new Outlook
+  if(html && html.trim()) tasks = parseEmailListHtml(html);
+  // otherwise parse the plain text (handles single + blank-line/columned multi)
   if(!tasks.length && text && text.trim()) tasks = splitEmails(text).map(parseBlock).filter(Boolean);
+  // a link drag (e.g. an owa message url)
   if(!tasks.length && uri && uri.trim()){
     tasks = uri.split("\n").map(l=>l.trim()).filter(l=>l && !l.startsWith("#"))
                .map(u=>makeTask({subject:u, webLink:u}));
   }
-  if(tasks.length) await addTasks(tasks);
-  else toast("Couldn't read that — try pasting instead");
+  // last resort: any textual payload at all → one follow-up, so a real email
+  // never silently fails. Prefer flattened HTML, then text, then anything.
+  if(!tasks.length){
+    const blob = (html && htmlToText(html)) || text ||
+                 Object.values(data).find(v=>v && v.trim()) || "";
+    const line = blob.split("\n").map(s=>s.trim()).find(Boolean);
+    if(line){
+      const email = (blob.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)||[])[0] || null;
+      tasks = [makeTask({subject: line.slice(0,140), sender: email})];
+    }
+  }
+
+  if(tasks.length){ await addTasks(tasks); return; }
+
+  // truly nothing usable — log what was offered so it can be diagnosed
+  console.warn("Follow-Ups: nothing parseable in drop. types =", dt.types, data);
+  toast("Couldn't read that drop — try the paste option instead");
 });
 drop.addEventListener("click", e=>{ if(e.target.id!=="pasteOpen") openPaste(); });
 
