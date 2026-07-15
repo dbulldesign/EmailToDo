@@ -202,7 +202,7 @@
 
   <div class="drop" id="drop">
     <div class="big">Drag emails here</div>
-    <div class="small">Drop <b>.msg</b> files straight from Outlook — or <span class="paste-link" id="pasteOpen">paste an email instead</span></div>
+    <div class="small">Drop one or many <b>.msg</b> files, or a whole selection from Outlook on the web — or <span class="paste-link" id="pasteOpen">paste emails instead</span></div>
   </div>
 
   <div class="toolbar">
@@ -537,23 +537,78 @@ document.getElementById("btnImport").addEventListener("click", ()=>document.getE
 document.getElementById("btnLink").addEventListener("click", linkBackupFile);
 if(!canAutosave){ document.getElementById("btnLink").style.display="none"; }
 
-// ---------- parse pasted text ----------
-function parsePaste(text){
-  const blocks = text.split(/\n\s*\n/).map(b=>b.trim()).filter(Boolean);
-  const out=[];
-  for(const b of blocks){
-    const subjM = b.match(/subject\s*:\s*(.+)/i);
-    const fromM = b.match(/from\s*:\s*(.+)/i);
-    let subject = subjM ? subjM[1].trim() : null;
-    let sender = fromM ? fromM[1].trim() : null;
-    if(!subject){ // treat first non-from line as subject
-      const first = b.split("\n").find(l=>!/^from\s*:/i.test(l));
-      subject = first ? first.trim() : b.slice(0,80);
-    }
-    out.push(makeTask({subject, sender}));
-  }
-  return out;
+// ---------- parse pasted / dropped email text ----------
+// Split a blob of text into one chunk per email, using the most reliable
+// signal available: blank lines, then repeated "Subject:" headers, then
+// (only when there are no header markers at all) one email per line.
+function splitEmails(text){
+  const norm = (text||"").replace(/\r\n?/g,"\n").trim();
+  if(!norm) return [];
+  // A) blank-line separated blocks — the clearest boundary
+  let blocks = norm.split(/\n[ \t]*\n+/).map(b=>b.trim()).filter(Boolean);
+  if(blocks.length > 1) return blocks;
+  // B) one run of text with repeated "Subject:" lines → split at each new message
+  const bySubject = norm.split(/\n(?=[ \t]*subject[ \t]*:)/i).map(b=>b.trim()).filter(Boolean);
+  if(bySubject.length > 1) return bySubject;
+  // C) several plain rows and no header markers → treat each line as its own email
+  const lines = norm.split("\n").map(l=>l.trim()).filter(Boolean);
+  const hasHeaders = lines.some(l=>/^(subject|from|to|cc|sent|date|received)[ \t]*:/i.test(l));
+  if(lines.length > 1 && !hasHeaders) return lines;
+  // D) a single email
+  return [norm];
 }
+
+// Turn one chunk (single line or multi-line block) into a task.
+function parseBlock(block){
+  const b = (block||"").replace(/\r/g,"").trim();
+  if(!b) return null;
+  const grab = re => { const m = b.match(re); return m ? m[1].trim() : null; };
+  let subject = grab(/^[ \t]*subject[ \t]*:[ \t]*(.+)$/im);
+  let sender  = grab(/^[ \t]*from[ \t]*:[ \t]*(.+)$/im);
+  const to    = grab(/^[ \t]*to[ \t]*:[ \t]*(.+)$/im);
+  const cc    = grab(/^[ \t]*cc[ \t]*:[ \t]*(.+)$/im);
+  const dateS = grab(/^[ \t]*(?:sent|date|received)[ \t]*:[ \t]*(.+)$/im);
+  if(!subject){
+    const rowLines = b.split("\n").map(l=>l.trim()).filter(Boolean);
+    let cand = rowLines.find(l=>!/^(from|to|cc|sent|date|received)[ \t]*:/i.test(l)) || rowLines[0] || b.slice(0,80);
+    // list-row form: "Dana Okoro   Q3 budget review   Mon 3:14 PM" (tab or 2+ space separated)
+    const fields = cand.split(/\t|\s{2,}/).map(s=>s.trim()).filter(Boolean);
+    if(fields.length > 1){
+      if(!sender) sender = fields.find(f=>/@/.test(f)) || fields[0];
+      const rest = fields.filter(f=>f!==sender);
+      subject = rest.sort((a,z)=>z.length-a.length)[0] || cand;
+    } else {
+      subject = cand;
+    }
+  }
+  let date = null;
+  if(dateS){ const d = new Date(dateS); if(!isNaN(d.getTime())) date = d.toISOString(); }
+  return makeTask({subject, sender, to, cc, date});
+}
+
+// Extract emails from dropped HTML (Outlook on the web hands over a table/list).
+function parseEmailHtml(html){
+  let doc;
+  try{ doc = new DOMParser().parseFromString(html, "text/html"); }
+  catch(e){ return []; }
+  // a table where each row is a message
+  const rows = [...doc.querySelectorAll("tr")].filter(tr=>tr.textContent.trim());
+  if(rows.length){
+    const tasks = rows.map(tr=>{
+      const cells = [...tr.querySelectorAll("td,th")].map(c=>c.textContent.trim()).filter(Boolean);
+      return parseBlock(cells.length ? cells.join("\t") : tr.textContent.trim());
+    }).filter(Boolean);
+    if(tasks.length) return tasks;
+  }
+  // a list where each item is a message
+  const items = [...doc.querySelectorAll("li")].filter(li=>li.textContent.trim());
+  if(items.length > 1) return items.map(li=>parseBlock(li.textContent.trim())).filter(Boolean);
+  // otherwise fall back to the flattened text
+  const text = (doc.body ? doc.body.textContent : "") || "";
+  return splitEmails(text).map(parseBlock).filter(Boolean);
+}
+
+function parsePaste(text){ return splitEmails(text).map(parseBlock).filter(Boolean); }
 
 // ---------- parse .msg ----------
 async function parseMsgFile(file){
@@ -657,17 +712,19 @@ drop.addEventListener("drop", async ev=>{
     await addTasks(tasks);
     return;
   }
-  // new/web Outlook drops text or a url
-  const text = dt.getData("text/plain") || dt.getData("text/uri-list");
+  // new/web Outlook drops text, html, or a url — any of which may hold several emails
   const html = dt.getData("text/html");
-  if(text && text.trim()){
-    // try to pull a subject-ish line
-    const lines = text.split("\n").map(l=>l.trim()).filter(Boolean);
-    const t = makeTask({subject: lines[0], sender: lines.find(l=>/@/.test(l))||null});
-    await addTasks([t]);
-  } else {
-    toast("Couldn't read that — try pasting instead");
+  const text = dt.getData("text/plain");
+  const uri  = dt.getData("text/uri-list");
+  let tasks = [];
+  if(html && html.trim()) tasks = parseEmailHtml(html);
+  if(!tasks.length && text && text.trim()) tasks = splitEmails(text).map(parseBlock).filter(Boolean);
+  if(!tasks.length && uri && uri.trim()){
+    tasks = uri.split("\n").map(l=>l.trim()).filter(l=>l && !l.startsWith("#"))
+               .map(u=>makeTask({subject:u, webLink:u}));
   }
+  if(tasks.length) await addTasks(tasks);
+  else toast("Couldn't read that — try pasting instead");
 });
 drop.addEventListener("click", e=>{ if(e.target.id!=="pasteOpen") openPaste(); });
 
