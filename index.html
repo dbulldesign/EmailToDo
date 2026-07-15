@@ -136,6 +136,14 @@
     margin-top:3px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;
   }
   .meta .sender{color:var(--ink)}
+  .tag{
+    font-family:ui-sans-serif,system-ui,sans-serif;font-size:11px;font-weight:700;letter-spacing:.02em;
+    border:1px solid var(--line);border-radius:6px;padding:1px 7px;line-height:1.7;
+    background:var(--paper);color:var(--ink-soft);cursor:pointer;text-decoration:none;white-space:nowrap;
+  }
+  .tag.po{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft)}
+  .tag.ship{color:var(--amber);border-color:#f0e2c8;background:#fbf3e2}
+  .tag:hover{filter:brightness(.96)}
   .open{
     font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;font-weight:600;
     color:var(--accent);text-decoration:none;border:1px solid var(--accent-soft);
@@ -209,7 +217,7 @@
   <div class="toolbar">
     <label class="search">
       <span style="color:var(--ink-soft)">⌕</span>
-      <input id="q" placeholder="Search subjects, senders, projects…" />
+      <input id="q" placeholder="Search subjects, senders, projects, PO #, tracking…" />
     </label>
     <div class="filter" id="filter">
       <button data-f="open" class="on">To do</button>
@@ -279,8 +287,9 @@ From: Marketing"></textarea>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const CHANGELOG = {
+  "1.2.0": "Recognize PO numbers and shipment tracking — click a PO to see all its emails",
   "1.1.0": "Drag in several emails at once; accept both classic and new Outlook",
   "1.0.0": "First release — drag emails in as follow-ups, grouped by project"
 };
@@ -424,6 +433,38 @@ function outlookSearchLink(t){
 }
 
 // ---------- add tasks ----------
+// ---------- PO number & shipment tracking detection ----------
+// Pull a purchase-order number out of text: "PO 12345", "P.O. #12345",
+// "PO-2024-001", "Purchase Order: 4500012345". Requires a digit in the id,
+// so "PO Box" and words like "PORTLAND" don't false-match.
+function extractPO(text){
+  const m = (text||"").match(/\b(?:p\.?\s*o\.?|purchase\s+order)\s*(?:#|no\.?|number|num)?\s*[:#\-]?\s*((?=[A-Za-z0-9][A-Za-z0-9\-\/]*\d)[A-Za-z0-9][A-Za-z0-9\-\/]{1,24})/i);
+  if(!m) return null;
+  return m[1].toUpperCase().replace(/[\-\/]+$/,"");
+}
+
+// Pull a shipment/tracking number: an explicit "Tracking: …" label, or the
+// unmistakable carrier formats (UPS 1Z…, USPS 9-prefixed 22-digit).
+function extractTracking(text){
+  const s = text||"";
+  let m = s.match(/track(?:ing)?\s*(?:#|no\.?|number|num|id)?\s*[:#]\s*([A-Za-z0-9][A-Za-z0-9\- ]{6,34})/i);
+  if(m){
+    const v = m[1].replace(/[^A-Za-z0-9]/g,"").toUpperCase();
+    if(v.length>=8 && /\d/.test(v)) return v;
+  }
+  m = s.match(/\b1Z[0-9A-Z]{16}\b/i);              if(m) return m[0].toUpperCase(); // UPS
+  m = s.match(/\b(?:94|93|92|95)\d{18,24}\b/);      if(m) return m[0];               // USPS
+  return null;
+}
+
+// Best-effort carrier tracking link; falls back to a universal lookup.
+function trackingUrl(t){
+  const v = (t||"").replace(/\s+/g,"");
+  if(/^1Z[0-9A-Z]{16}$/i.test(v)) return `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(v)}`;
+  if(/^(94|93|92|95)\d{18,24}$/.test(v)) return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(v)}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(v+" tracking")}`;
+}
+
 function makeTask({subject, sender, date, webLink, cc, to, body}){
   const subj = (subject||"").trim() || "(no subject)";
   const t = {
@@ -438,6 +479,9 @@ function makeTask({subject, sender, date, webLink, cc, to, body}){
     done: false,
     added: Date.now()
   };
+  const hay = `${subj}\n${t.body}`;
+  t.po = extractPO(hay);
+  t.tracking = extractTracking(hay);
   t.project = categorise(t);
   return t;
 }
@@ -694,7 +738,7 @@ function render(){
     if(state.filter==="open" && t.done) return false;
     if(state.filter==="done" && !t.done) return false;
     if(q){
-      return (t.subject+" "+t.sender+" "+t.project).toLowerCase().includes(q);
+      return (t.subject+" "+t.sender+" "+t.project+" "+(t.po||"")+" "+(t.tracking||"")).toLowerCase().includes(q);
     }
     return true;
   });
@@ -740,6 +784,8 @@ function taskHTML(t){
       <div class="meta">
         ${t.sender?`<span class="sender">${esc(cleanSender(t.sender))}</span>`:""}
         ${date?`<span>· ${date}</span>`:""}
+        ${t.po?`<button class="tag po" data-find="${esc("PO "+t.po)}" title="Show every email for this PO">PO ${esc(t.po)}</button>`:""}
+        ${t.tracking?`<a class="tag ship" href="${esc(trackingUrl(t.tracking))}" target="_blank" rel="noopener" title="Track this shipment">📦 ${esc(t.tracking)} ↗</a>`:""}
       </div>
     </div>
     <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook web">Open ↗</a>
@@ -825,6 +871,14 @@ document.getElementById("pasteAdd").addEventListener("click", async ()=>{
 
 // list interactions (delegated)
 document.getElementById("list").addEventListener("click", async e=>{
+  const find = e.target.closest("[data-find]");
+  if(find){
+    const val = find.dataset.find;
+    const qEl = document.getElementById("q");
+    qEl.value = val; state.q = val; render();
+    qEl.scrollIntoView({block:"nearest"});
+    return;
+  }
   const chk = e.target.closest("[data-check]");
   if(chk){
     const t = state.tasks.find(x=>x.id===chk.dataset.check);
@@ -881,6 +935,15 @@ async function saveColors(){ await db.meta.put({key:"colors", val:projectColors}
     const c = await db.meta.get("colors");
     if(c) projectColors = c.val || {};
     rules = (await db.rules.toArray()) || [];
+    // backfill PO / tracking on emails added before this feature existed
+    for(const t of state.tasks){
+      if(t.po===undefined && t.tracking===undefined){
+        const hay = `${t.subject||""}\n${t.body||""}`;
+        t.po = extractPO(hay);
+        t.tracking = extractTracking(hay);
+        await db.tasks.put(t);
+      }
+    }
   }catch(e){ console.warn(e); }
   render();
 })();
