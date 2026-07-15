@@ -143,7 +143,14 @@
   }
   .tag.po{color:var(--accent);border-color:var(--accent-soft);background:var(--accent-soft)}
   .tag.ship{color:var(--amber);border-color:#f0e2c8;background:#fbf3e2}
+  .tag.person{color:var(--ink-soft);background:var(--paper);border-color:var(--line);font-weight:600}
+  .tag.person:hover{border-color:var(--accent);color:var(--accent);filter:none}
   .tag:hover{filter:brightness(.96)}
+  /* clickable sender + cc people */
+  .person-link{font:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer;color:var(--ink)}
+  .person-link:hover{color:var(--accent);text-decoration:underline}
+  .people{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:7px}
+  .people-lbl{font-family:ui-sans-serif,system-ui,sans-serif;font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft)}
   .open{
     font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;font-weight:600;
     color:var(--accent);text-decoration:none;border:1px solid var(--accent-soft);
@@ -314,12 +321,25 @@ From: Marketing"></textarea>
   </div>
 </div>
 
+<!-- info / help modal -->
+<div class="modal-bg" id="infoBg">
+  <div class="modal" style="max-width:540px">
+    <h3 id="infoTitle">Heads up</h3>
+    <div id="infoBody" style="font-size:13.5px;color:var(--ink);line-height:1.6"></div>
+    <div class="row">
+      <button class="btn" id="infoClose">Close</button>
+      <button class="btn primary" id="infoPaste">Paste instead</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const CHANGELOG = {
+  "1.5.0": "Tag people from From/Cc for one-click search; clearer help when new Outlook drags aren't readable",
   "1.4.0": "Global search across every field — PO, project, person, or any text in an email",
   "1.3.0": "Move an email to another project (and it stays put through re-sorts)",
   "1.2.0": "Recognize PO numbers and shipment tracking — click a PO to see all its emails",
@@ -713,6 +733,26 @@ function parseEmailListHtml(html){
 
 function parsePaste(text){ return splitEmails(text).map(parseBlock).filter(Boolean); }
 
+// New Outlook drags an internal JSON reference (e.g. {"itemType":
+// "multimaillistconversationrows",...}) instead of the email's content, so
+// there's nothing real to save. Detect it to avoid making a junk to-do.
+function isOutlookItemRef(text){
+  const t = (text||"").trim();
+  return /^\{/.test(t) && /"itemType"\s*:/.test(t) && /conversation|mail|message|folderId/i.test(t);
+}
+
+// Split a From/Cc/To field into individual people {name, email}.
+function parsePeople(str){
+  if(!str) return [];
+  return str.split(/[;\n]+/).map(s=>s.trim()).filter(Boolean).map(part=>{
+    const m = part.match(/^"?([^"<]+?)"?\s*<([^>]+)>$/);
+    if(m) return { name: m[1].trim(), email: m[2].trim().toLowerCase() };
+    const em = part.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+    if(em) return { name: (part.replace(/[<>]/g,"").trim() || em[0]), email: em[0].toLowerCase() };
+    return { name: part, email: null };
+  }).filter(p=>p.name || p.email);
+}
+
 // ---------- parse .msg ----------
 async function parseMsgFile(file){
   const buf = await file.arrayBuffer();
@@ -815,19 +855,29 @@ function render(){
   }).join("");
 }
 
+function personChip(p, cls){
+  const label = p.name || p.email;
+  return `<button class="tag person${cls?" "+cls:""}" data-find="${esc(p.name||p.email)}" title="Search this person">👤 ${esc(label)}</button>`;
+}
 function taskHTML(t){
   const link = t.webLink || outlookSearchLink(t);
   const date = t.date ? new Date(t.date).toLocaleDateString(undefined,{month:"short",day:"numeric"}) : "";
+  const sender = t.sender ? parsePeople(t.sender)[0] : null;
+  // people to tag: sender (From) + everyone on Cc, de-duplicated
+  const cc = parsePeople(t.cc);
+  const seen = new Set(sender ? [(sender.email||sender.name||"").toLowerCase()] : []);
+  const ccUnique = cc.filter(p=>{ const k=(p.email||p.name||"").toLowerCase(); if(!k||seen.has(k)) return false; seen.add(k); return true; });
   return `<div class="task ${t.done?"done":""}" data-id="${t.id}">
     <input type="checkbox" class="box" ${t.done?"checked":""} data-check="${t.id}" aria-label="Mark done"/>
     <div class="body">
       <span class="subj">${esc(t.subject)}</span>
       <div class="meta">
-        ${t.sender?`<span class="sender">${esc(cleanSender(t.sender))}</span>`:""}
+        ${sender?`<button class="sender person-link" data-find="${esc(sender.name||sender.email)}" title="Search this person">${esc(sender.name||sender.email)}</button>`:""}
         ${date?`<span>· ${date}</span>`:""}
         ${t.po?`<button class="tag po" data-find="${esc("PO "+t.po)}" title="Show every email for this PO">PO ${esc(t.po)}</button>`:""}
         ${t.tracking?`<a class="tag ship" href="${esc(trackingUrl(t.tracking))}" target="_blank" rel="noopener" title="Track this shipment">📦 ${esc(t.tracking)} ↗</a>`:""}
       </div>
+      ${ccUnique.length?`<div class="people"><span class="people-lbl">Cc</span>${ccUnique.map(p=>personChip(p)).join("")}</div>`:""}
     </div>
     <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook web">Open ↗</a>
     <button class="mv" data-move="${t.id}" title="Move to another project">Move</button>
@@ -867,6 +917,13 @@ drop.addEventListener("drop", async ev=>{
   const text = data["text/plain"];
   const uri  = data["text/uri-list"] || data["text/x-moz-url"] || data["URL"];
   let tasks = [];
+
+  // New Outlook message-list drags carry only an internal reference, not the
+  // email — bail early with guidance instead of saving the JSON as a to-do.
+  if(isOutlookItemRef(text) || isOutlookItemRef(html)){
+    showNewOutlookHelp();
+    return;
+  }
 
   // a multi-message list from Outlook on the web / new Outlook
   if(html && html.trim()) tasks = parseEmailListHtml(html);
@@ -910,6 +967,28 @@ document.getElementById("pasteAdd").addEventListener("click", async ()=>{
   await addTasks(parsePaste(v));
   closePaste();
 });
+
+// info / help modal
+const infoBg = document.getElementById("infoBg");
+function openInfo(title, bodyHTML){
+  document.getElementById("infoTitle").textContent = title;
+  document.getElementById("infoBody").innerHTML = bodyHTML;
+  infoBg.classList.add("show");
+}
+function closeInfo(){ infoBg.classList.remove("show"); }
+document.getElementById("infoClose").addEventListener("click", closeInfo);
+document.getElementById("infoPaste").addEventListener("click", ()=>{ closeInfo(); openPaste(); });
+infoBg.addEventListener("click", e=>{ if(e.target===infoBg) closeInfo(); });
+function showNewOutlookHelp(){
+  openInfo("New Outlook doesn't include the email",
+    `<p style="margin-bottom:10px">When you drag from <b>new Outlook</b>'s message list, it only sends an internal reference — not the subject, sender, or body — so there's nothing to save.</p>
+     <p style="margin-bottom:6px">Reliable ways to add it:</p>
+     <ul style="margin:0 0 4px 18px;padding:0">
+       <li style="margin-bottom:6px"><b>Drag it to your desktop first.</b> New Outlook saves the email as a <b>.eml</b> file — then drag that file in here.</li>
+       <li style="margin-bottom:6px"><b>Open the email, select all (Ctrl+A) and copy (Ctrl+C)</b>, then use <b>Paste instead</b> below.</li>
+       <li><b>Classic Outlook</b> drags the full email directly — no extra step.</li>
+     </ul>`);
+}
 
 // move an email to another project
 let moveId = null;
