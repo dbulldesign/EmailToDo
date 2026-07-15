@@ -155,6 +155,23 @@
     background:none;border:0;cursor:pointer;padding:2px 4px;transition:.15s;
   }
   .del:hover{color:var(--flag)}
+  .mv{
+    font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;font-weight:600;
+    color:var(--ink-soft);background:none;border:1px solid var(--line);
+    padding:3px 10px;border-radius:8px;white-space:nowrap;cursor:pointer;transition:.15s;
+  }
+  .mv:hover{border-color:var(--accent);color:var(--accent)}
+  /* move-to-project picker */
+  .move-list{display:flex;flex-wrap:wrap;gap:7px}
+  .move-opt{
+    font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;color:var(--ink);
+    border:1px solid var(--line);background:var(--paper);border-radius:9px;
+    padding:7px 11px;cursor:pointer;display:flex;align-items:center;gap:7px;transition:.15s;
+  }
+  .move-opt .dot{width:9px;height:9px;border-radius:3px;flex:none}
+  .move-opt:hover{border-color:var(--accent)}
+  .move-opt.current{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);cursor:default}
+  .move-cur{font-size:11px;font-weight:700;opacity:.7}
 
   .empty{
     text-align:center;padding:54px 20px;color:var(--ink-soft);
@@ -217,7 +234,7 @@
   <div class="toolbar">
     <label class="search">
       <span style="color:var(--ink-soft)">⌕</span>
-      <input id="q" placeholder="Search subjects, senders, projects, PO #, tracking…" />
+      <input id="q" placeholder="Search anything — PO #, project, person, or text in an email…" />
     </label>
     <div class="filter" id="filter">
       <button data-f="open" class="on">To do</button>
@@ -283,12 +300,28 @@ From: Marketing"></textarea>
   </div>
 </div>
 
+<!-- move-to-project modal -->
+<div class="modal-bg" id="moveBg">
+  <div class="modal" style="max-width:460px">
+    <h3>Move to project</h3>
+    <p>Pick a project for this email, or type a new one. A moved email stays put even if your sorting rules change.</p>
+    <div id="moveList" class="move-list"></div>
+    <div style="display:flex;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)">
+      <input id="moveNew" class="rin" placeholder="New project name" style="flex:1"/>
+      <button class="btn primary" id="moveCreate" style="padding:9px 14px">Create &amp; move</button>
+    </div>
+    <div class="row"><button class="btn" id="moveCancel">Cancel</button></div>
+  </div>
+</div>
+
 <script>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.4.0";
 const CHANGELOG = {
+  "1.4.0": "Global search across every field — PO, project, person, or any text in an email",
+  "1.3.0": "Move an email to another project (and it stays put through re-sorts)",
   "1.2.0": "Recognize PO numbers and shipment tracking — click a PO to see all its emails",
   "1.1.0": "Drag in several emails at once; accept both classic and new Outlook",
   "1.0.0": "First release — drag emails in as follow-ups, grouped by project"
@@ -447,9 +480,9 @@ function extractPO(text){
 // unmistakable carrier formats (UPS 1Z…, USPS 9-prefixed 22-digit).
 function extractTracking(text){
   const s = text||"";
-  let m = s.match(/track(?:ing)?\s*(?:#|no\.?|number|num|id)?\s*[:#]\s*([A-Za-z0-9][A-Za-z0-9\- ]{6,34})/i);
+  let m = s.match(/track(?:ing)?\s*(?:#|no\.?|number|num|id)?\s*[:#]\s*([A-Za-z0-9][A-Za-z0-9\-]{6,33})/i);
   if(m){
-    const v = m[1].replace(/[^A-Za-z0-9]/g,"").toUpperCase();
+    const v = m[1].replace(/-+$/,"").toUpperCase();
     if(v.length>=8 && /\d/.test(v)) return v;
   }
   m = s.match(/\b1Z[0-9A-Z]{16}\b/i);              if(m) return m[0].toUpperCase(); // UPS
@@ -638,7 +671,12 @@ function parseBlock(block){
   }
   let date = null;
   if(dateS){ const d = new Date(dateS); if(!isNaN(d.getTime())) date = d.toISOString(); }
-  return makeTask({subject, sender, to, cc, date});
+  // keep the remaining (non-header) lines as the body so tracking numbers,
+  // PO numbers, and free-text search all work on pasted/dropped emails
+  const body = b.split("\n").map(l=>l.trim())
+    .filter(l=>l && !/^(subject|from|to|cc|sent|date|received)[ \t]*:/i.test(l))
+    .join("\n").slice(0, 4000);
+  return makeTask({subject, sender, to, cc, date, body});
 }
 
 function htmlToDoc(html){
@@ -738,7 +776,10 @@ function render(){
     if(state.filter==="open" && t.done) return false;
     if(state.filter==="done" && !t.done) return false;
     if(q){
-      return (t.subject+" "+t.sender+" "+t.project+" "+(t.po||"")+" "+(t.tracking||"")).toLowerCase().includes(q);
+      // global search: every field, all query words must match (in any order)
+      const hay = [t.subject,t.sender,t.cc,t.to,t.body,t.project,t.po,t.tracking]
+        .filter(Boolean).join(" ").toLowerCase();
+      return q.split(/\s+/).filter(Boolean).every(term=>hay.includes(term));
     }
     return true;
   });
@@ -789,6 +830,7 @@ function taskHTML(t){
       </div>
     </div>
     <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook web">Open ↗</a>
+    <button class="mv" data-move="${t.id}" title="Move to another project">Move</button>
     <button class="del" data-del="${t.id}" title="Remove">×</button>
   </div>`;
 }
@@ -869,6 +911,43 @@ document.getElementById("pasteAdd").addEventListener("click", async ()=>{
   closePaste();
 });
 
+// move an email to another project
+let moveId = null;
+const moveBg = document.getElementById("moveBg");
+function openMove(id){
+  const t = state.tasks.find(x=>x.id===id); if(!t) return;
+  moveId = id;
+  const projects = [...new Set(state.tasks.map(x=>x.project))].sort((a,b)=>a.localeCompare(b));
+  document.getElementById("moveList").innerHTML = projects.map(p=>`
+    <button class="move-opt ${p===t.project?"current":""}" data-move-to="${esc(p)}"${p===t.project?" disabled":""}>
+      <span class="dot" style="background:${colorFor(p)}"></span>${esc(p)}${p===t.project?`<span class="move-cur">current</span>`:""}
+    </button>`).join("");
+  document.getElementById("moveNew").value="";
+  moveBg.classList.add("show");
+}
+function closeMove(){ moveBg.classList.remove("show"); moveId=null; }
+async function moveTo(project){
+  const t = state.tasks.find(x=>x.id===moveId);
+  const nm = titleCase((project||"").trim());
+  if(t && nm && nm!==t.project){
+    t.project = nm; t.pinned = true; colorFor(nm);
+    await persist(t); render(); toast(`Moved to ${nm}`);
+  }
+  closeMove();
+}
+document.getElementById("moveList").addEventListener("click", e=>{
+  const b = e.target.closest("[data-move-to]"); if(b) moveTo(b.dataset.moveTo);
+});
+document.getElementById("moveCreate").addEventListener("click", ()=>{
+  const v = document.getElementById("moveNew").value.trim();
+  if(v) moveTo(v); else toast("Type a project name");
+});
+document.getElementById("moveNew").addEventListener("keydown", e=>{
+  if(e.key==="Enter"){ const v=e.target.value.trim(); if(v) moveTo(v); }
+});
+document.getElementById("moveCancel").addEventListener("click", closeMove);
+moveBg.addEventListener("click", e=>{ if(e.target===moveBg) closeMove(); });
+
 // list interactions (delegated)
 document.getElementById("list").addEventListener("click", async e=>{
   const find = e.target.closest("[data-find]");
@@ -879,6 +958,8 @@ document.getElementById("list").addEventListener("click", async e=>{
     qEl.scrollIntoView({block:"nearest"});
     return;
   }
+  const mv = e.target.closest("[data-move]");
+  if(mv){ openMove(mv.dataset.move); return; }
   const chk = e.target.closest("[data-check]");
   if(chk){
     const t = state.tasks.find(x=>x.id===chk.dataset.check);
