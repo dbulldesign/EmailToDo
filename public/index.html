@@ -1,0 +1,164 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Inbox by Project</title>
+<style>
+  :root {
+    --ink: #17202a;
+    --muted: #6b7683;
+    --line: #e3e8ee;
+    --surface: #ffffff;
+    --bg: #f5f7fa;
+    --accent: #2f5d8a;
+    --accent-soft: #eaf1f8;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+  header {
+    padding: 22px 28px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  button {
+    margin-left: auto;
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    padding: 9px 16px;
+    border-radius: 8px;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  main {
+    padding: 24px 28px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 18px;
+    align-items: start;
+  }
+  .col {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .col h2 {
+    margin: 0;
+    padding: 13px 16px;
+    font-size: 14px;
+    font-weight: 650;
+    background: var(--accent-soft);
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+  }
+  .col h2 .count { color: var(--muted); font-weight: 500; }
+  .msg {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    display: block;
+    color: inherit;
+    text-decoration: none;
+  }
+  .msg:last-child { border-bottom: 0; }
+  .msg:hover { background: #fafbfc; }
+  .msg .subj { font-weight: 600; margin-bottom: 2px; }
+  .msg .row { display: flex; justify-content: space-between; gap: 10px; }
+  .msg .from { color: var(--accent); font-size: 13px; }
+  .msg .date { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .msg .prev { color: var(--muted); font-size: 13px; margin-top: 3px; }
+  .empty, .loading, .error {
+    padding: 60px 28px; text-align: center; color: var(--muted);
+  }
+  .error { color: #b23b3b; }
+</style>
+
+<header>
+  <h1>Inbox by Project</h1>
+  <span class="meta" id="meta"></span>
+  <button id="refresh">Fetch &amp; sort</button>
+</header>
+<main id="main">
+  <div class="loading">Click “Fetch &amp; sort” to load your inbox.</div>
+</main>
+
+<script>
+  const main = document.getElementById("main");
+  const meta = document.getElementById("meta");
+  const btn = document.getElementById("refresh");
+
+  function fmtDate(iso) {
+    return new Date(iso).toLocaleDateString(undefined, {
+      month: "short", day: "numeric",
+    });
+  }
+
+  function render(data) {
+    const entries = Object.entries(data.buckets);
+    if (!entries.length) {
+      main.innerHTML = '<div class="empty">No messages found.</div>';
+      return;
+    }
+    entries.sort((a, b) => b[1].length - a[1].length);
+    meta.textContent =
+      `mode: ${data.mode}` + (data.applied ? " · tagged in Outlook" : " · read-only");
+
+    main.innerHTML = "";
+    for (const [project, list] of entries) {
+      const col = document.createElement("div");
+      col.className = "col";
+      col.innerHTML =
+        `<h2>${escapeHtml(project)}<span class="count">${list.length}</span></h2>`;
+      for (const m of list) {
+        const a = document.createElement("a");
+        a.className = "msg";
+        a.href = m.webLink || "#";
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.innerHTML =
+          `<div class="subj">${escapeHtml(m.subject)}</div>` +
+          `<div class="row"><span class="from">${escapeHtml(m.from)}</span>` +
+          `<span class="date">${fmtDate(m.received)}</span></div>` +
+          `<div class="prev">${escapeHtml(m.preview)}</div>`;
+        col.appendChild(a);
+      }
+      main.appendChild(col);
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
+    );
+  }
+
+  async function load() {
+    btn.disabled = true;
+    main.innerHTML = '<div class="loading">Signing in and fetching… (approve any browser prompt)</div>';
+    try {
+      const res = await fetch("/api/emails");
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      render(data);
+    } catch (err) {
+      main.innerHTML = '<div class="error">' + escapeHtml(err.message) + "</div>";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener("click", load);
+</script>

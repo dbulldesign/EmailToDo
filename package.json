@@ -1,0 +1,20 @@
+{
+  "name": "outlook-organizer",
+  "version": "1.0.0",
+  "description": "Fetch your Outlook inbox via Microsoft Graph and auto-categorize emails into projects.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "categorize": "node src/index.js categorize",
+    "list-projects": "node src/index.js list-projects",
+    "server": "node src/server.js"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^2.16.2",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "isomorphic-fetch": "^3.0.0",
+    "open": "^10.1.0"
+  }
+}

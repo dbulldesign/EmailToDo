@@ -1,0 +1,25 @@
+{
+  "projects": [
+    {
+      "name": "Acme Redesign",
+      "keywords": ["acme", "redesign", "mockup", "figma", "wireframe"],
+      "senders": ["@acme.com"]
+    },
+    {
+      "name": "Finance & Invoices",
+      "keywords": ["invoice", "payment", "receipt", "expense", "reimbursement", "PO number"],
+      "senders": ["billing@", "accounts@", "@stripe.com"]
+    },
+    {
+      "name": "Hiring",
+      "keywords": ["candidate", "interview", "resume", "cv", "offer letter", "recruiter"],
+      "senders": ["@greenhouse.io", "@lever.co"]
+    },
+    {
+      "name": "Team Ops",
+      "keywords": ["standup", "sprint", "retro", "1:1", "roadmap", "okr"],
+      "senders": []
+    }
+  ],
+  "fallback": "Uncategorized"
+}
