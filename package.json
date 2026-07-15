@@ -1,6 +1,6 @@
 {
   "name": "outlook-organizer",
-  "version": "1.1.0",
+  "version": "1.4.0",
   "description": "Fetch your Outlook inbox via Microsoft Graph and auto-categorize emails into projects.",
   "type": "module",
   "scripts": {
