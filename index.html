@@ -52,6 +52,7 @@
     font-size:13px;color:var(--ink-soft);white-space:nowrap;
   }
   .count b{color:var(--accent);font-weight:700}
+  .ver{color:var(--accent);font-weight:700;cursor:default}
 
   /* drop zone */
   .drop{
@@ -195,7 +196,7 @@
   <header class="top">
     <div class="brand">
       <h1>Follow-Ups</h1>
-      <div class="sub">Emails you owe a reply, grouped by project</div>
+      <div class="sub">Emails you owe a reply, grouped by project · <span class="ver" id="ver"></span></div>
     </div>
     <div class="count" id="count">Nothing yet</div>
   </header>
@@ -275,6 +276,15 @@ From: Marketing"></textarea>
 </div>
 
 <script>
+// ---------- version ----------
+// Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
+// The number shows in the header (hover it to see what's in the release).
+const APP_VERSION = "1.1.0";
+const CHANGELOG = {
+  "1.1.0": "Drag in several emails at once; accept both classic and new Outlook",
+  "1.0.0": "First release — drag emails in as follow-ups, grouped by project"
+};
+
 // ---------- storage ----------
 const db = new Dexie("followups");
 db.version(1).stores({ tasks: "id", meta: "key" });
@@ -858,6 +868,12 @@ function toast(msg){
 async function saveColors(){ await db.meta.put({key:"colors", val:projectColors}); }
 
 // ---------- boot ----------
+(function showVersion(){
+  const el = document.getElementById("ver");
+  if(!el) return;
+  el.textContent = "v" + APP_VERSION;
+  el.title = CHANGELOG[APP_VERSION] ? `v${APP_VERSION} — ${CHANGELOG[APP_VERSION]}` : `v${APP_VERSION}`;
+})();
 (async ()=>{
   try{
     const saved = await db.tasks.toArray();
