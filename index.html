@@ -344,8 +344,9 @@ From: Marketing"></textarea>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 const CHANGELOG = {
+  "1.6.1": "More reliable .msg reading — pull body and Cc from classic Outlook emails",
   "1.6.0": "Preview an email's body inline, and tag every From + Cc person",
   "1.5.0": "Tag people from From/Cc for one-click search; clearer help when new Outlook drags aren't readable",
   "1.4.0": "Global search across every field — PO, project, person, or any text in an email",
@@ -765,18 +766,39 @@ function parsePeople(str){
 async function parseMsgFile(file){
   const buf = await file.arrayBuffer();
   const reader = new MSGReader(buf);
-  const d = reader.getFileData();
+  const d = reader.getFileData() || {};
+  // diagnostic: expose the raw fields so shape issues can be inspected
+  try{ window.__lastMsg = d; console.debug("Follow-Ups .msg fields:", Object.keys(d), "recipient[0]:", (d.recipients||[])[0], "hasBody:", !!d.body, "hasHtml:", !!(d.bodyHTML||d.bodyHtml)); }catch(e){}
+
   const recips = Array.isArray(d.recipients) ? d.recipients : [];
-  const fmt = r => (r.name ? r.name : "") + (r.email ? ` <${r.email}>` : "");
-  // recipType: 1 = To, 2 = Cc, 3 = Bcc (fallbacks handle missing types)
-  const cc = recips.filter(r=>r.recipType===2).map(fmt).join("; ");
-  const to = recips.filter(r=>r.recipType===1 || r.recipType==null).map(fmt).join("; ");
+  const fmt = r => ((r.name||"") + (r.email||r.smtpAddress ? ` <${r.email||r.smtpAddress}>` : "")).trim();
+  // recipType may be a string ("to"/"cc"/"bcc") or a number (1/2/3)
+  const rtype = r => String(r.recipType==null ? "" : r.recipType).toLowerCase();
+  const isCc = r => { const t=rtype(r); return t==="cc" || t==="2"; };
+  const isTo = r => { const t=rtype(r); return t==="to" || t==="1"; };
+  let cc = recips.filter(isCc).map(fmt).filter(Boolean).join("; ");
+  let to = recips.filter(isTo).map(fmt).filter(Boolean).join("; ");
+  // if the library gave no usable types, treat all recipients as To
+  if(!cc && !to && recips.length) to = recips.map(fmt).filter(Boolean).join("; ");
+
+  // sender + header fallbacks (some .msg parse cleaner from raw headers)
+  const headers = d.headers || "";
+  const hdr = re => { const m = headers.match(re); return m ? m[1].trim() : ""; };
+  let sender = d.senderName ? `${d.senderName}${d.senderEmail?` <${d.senderEmail}>`:""}` : (d.senderEmail||"");
+  if(!sender) sender = hdr(/^from:\s*(.+)$/im);
+  if(!cc) cc = hdr(/^cc:\s*(.+)$/im);
+  if(!to) to = hdr(/^to:\s*(.+)$/im);
+
+  // body: plain text, else strip an HTML body
+  let body = d.body || "";
+  if(!body && (d.bodyHTML || d.bodyHtml)) body = htmlToText(d.bodyHTML || d.bodyHtml);
+
   return makeTask({
-    subject: d.subject,
-    sender: d.senderName ? `${d.senderName}${d.senderEmail?` <${d.senderEmail}>`:""}` : d.senderEmail,
+    subject: d.subject || (d.conversationTopic || ""),
+    sender,
     date: d.messageDeliveryTime || d.clientSubmitTime || null,
     cc, to,
-    body: (d.body || "").slice(0, 4000)
+    body: (body||"").slice(0, 4000)
   });
 }
 
@@ -787,7 +809,7 @@ async function parseDroppedFile(file){
   // .msg (or looks like one) → binary parser, with graceful fallbacks
   if(/\.msg$/i.test(name) || file.type==="application/vnd.ms-outlook"){
     try{ return [await parseMsgFile(file)]; }
-    catch(e){ /* fall through to text / filename */ }
+    catch(e){ console.warn("Follow-Ups: .msg parse failed, using filename —", e); }
   }
   // text-ish files (.eml, .txt, exported messages) → parse as email text
   if(/\.(eml|txt|mime)$/i.test(name) || /^text\//.test(file.type||"") ||
