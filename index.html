@@ -118,11 +118,17 @@
 
   /* task card */
   .task{
-    display:flex;gap:13px;align-items:flex-start;
+    display:flex;gap:13px;align-items:flex-start;flex-wrap:wrap;
     background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
     padding:14px 15px;margin-bottom:9px;box-shadow:var(--shadow);transition:.15s;
   }
   .task:hover{border-color:#d8d2c6}
+  .actions{display:flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap}
+  /* phones: let the email use the full width and drop the buttons below it */
+  @media (max-width:600px){
+    .task .body{flex:1 1 100%;min-width:0}
+    .actions{flex:1 1 100%;justify-content:flex-start;margin-top:4px}
+  }
   .task.done{opacity:.55}
   .task.done .subj{text-decoration:line-through}
   .box{
@@ -390,8 +396,9 @@ From: Marketing"></textarea>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.8.1";
 const CHANGELOG = {
+  "1.8.1": "Mobile layout fix (no more sideways subjects); 'Open in app' shows only where the file lives",
   "1.8.0": "Sync across devices via your own private GitHub repo; drop emails anywhere in the window",
   "1.7.0": "Open a dragged email in your desktop Outlook app (alongside Open on the web)",
   "1.6.2": "Fix .msg reading (library now loads correctly); add app icon + manifest",
@@ -414,7 +421,7 @@ db.version(3).stores({ tasks: "id", meta: "key", rules: "id", files: "id" });
 const PALETTE = ["#2f5d50","#c2543a","#3a5a8c","#8a6d3b","#6a4c93","#2c7873","#a63d57","#5b6b3a"];
 let projectColors = {};
 
-const state = { tasks: [], filter: "open", q: "", expanded: new Set() };
+const state = { tasks: [], filter: "open", q: "", expanded: new Set(), localMsg: new Set() };
 
 // ---------- keyword → project detection ----------
 const STOP = new Set(("re fwd fw the a an and or to of in on for your you our we with at is are be this that new please pls hi hello thanks thank regards update re: fw: fwd: report meeting call email mail message request").split(" "));
@@ -604,11 +611,12 @@ async function addTasks(arr){
   // strip the transient field so it never lands in tasks/backups/memory
   for(const t of arr){
     if(t._msg){
-      try{ await db.files.put({ id: t.id, name: t._msg.name, buf: t._msg.buf }); }
+      try{ await db.files.put({ id: t.id, name: t._msg.name, buf: t._msg.buf }); state.localMsg.add(t.id); }
       catch(e){ t.hasMsg = false; }
       delete t._msg;
     }
   }
+  await saveLocalMsg();
   state.tasks.push(...arr);
   await db.tasks.bulkPut(arr);
   render();
@@ -616,6 +624,9 @@ async function addTasks(arr){
   toast(`Added ${arr.length} email${arr.length>1?"s":""}`);
 }
 async function persist(t){ t.updated = Date.now(); await db.tasks.put(t); scheduleAutosave(); }
+// track which task ids have their raw .msg stored on THIS device (files don't
+// sync), so "Open in app" only shows where it can actually work
+async function saveLocalMsg(){ await db.meta.put({ key:"localMsg", val:[...state.localMsg] }); }
 
 // ---------- backup: export / import / auto-save ----------
 let fileHandle = null;      // File System Access handle when linked
@@ -1126,11 +1137,13 @@ function taskHTML(t){
       </div>`:""}
       ${hasBody&&expanded?`<div class="preview">${esc(t.body)}</div>`:""}
     </div>
-    ${hasBody?`<button class="mv exp" data-expand="${t.id}" title="${expanded?"Hide":"Show"} the email body">${expanded?"Hide":"Preview"}</button>`:""}
-    ${t.hasMsg?`<button class="open app" data-openmsg="${t.id}" title="Open this email in your desktop Outlook app">Open in app</button>`:""}
-    <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook on the web">Open ↗</a>
-    <button class="mv" data-move="${t.id}" title="Move to another project">Move</button>
-    <button class="del" data-del="${t.id}" title="Remove">×</button>
+    <div class="actions">
+      ${hasBody?`<button class="mv exp" data-expand="${t.id}" title="${expanded?"Hide":"Show"} the email body">${expanded?"Hide":"Preview"}</button>`:""}
+      ${state.localMsg.has(t.id)?`<button class="open app" data-openmsg="${t.id}" title="Open this email in your desktop Outlook app">Open in app</button>`:""}
+      <a class="open" href="${link}" target="_blank" rel="noopener" title="Open in Outlook on the web">Open ↗</a>
+      <button class="mv" data-move="${t.id}" title="Move to another project">Move</button>
+      <button class="del" data-del="${t.id}" title="Remove">×</button>
+    </div>
   </div>`;
 }
 function cleanSender(s){ return s.replace(/<[^>]+>/,"").trim() || s; }
@@ -1338,6 +1351,7 @@ document.getElementById("list").addEventListener("click", async e=>{
       await db.tasks.put(t);
     }
     try{ await db.files.delete(id); }catch(err){}
+    if(state.localMsg.delete(id)) await saveLocalMsg();
     render(); scheduleAutosave(); return;
   }
   const rn = e.target.closest("[data-rename]");
@@ -1386,6 +1400,7 @@ try{ loadMsgReader(); }catch(e){}
     const c = await db.meta.get("colors");
     if(c) projectColors = c.val || {};
     rules = (await db.rules.toArray()) || [];
+    const lm = await db.meta.get("localMsg"); state.localMsg = new Set(lm ? lm.val : []);
     await loadSyncCfg();
     // backfill PO / tracking on emails added before this feature existed
     for(const t of state.tasks){
