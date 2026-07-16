@@ -65,6 +65,14 @@
   }
   .drop:hover{border-color:#cfc9bc}
   .drop.hot{border-color:var(--accent);background:var(--accent-soft);transform:translateY(-1px)}
+  /* full-window drop cue */
+  body.dragging::after{
+    content:"Drop email(s) anywhere to add";
+    position:fixed;inset:12px;z-index:80;display:flex;align-items:center;justify-content:center;
+    font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;font-size:20px;font-weight:700;
+    color:var(--accent);background:rgba(230,239,233,.72);border:2.5px dashed var(--accent);border-radius:20px;
+    pointer-events:none;
+  }
   .drop .big{
     font-family:ui-sans-serif,system-ui,sans-serif;font-size:15px;font-weight:600;color:var(--ink);
   }
@@ -261,6 +269,7 @@
     </div>
     <div class="filter" id="backup">
       <button id="btnRules" title="Set rules that sort emails into projects">Rules</button>
+      <button id="btnSync" title="Sync across devices via a private GitHub repo">Sync</button>
       <button id="btnLink" title="Auto-save to a file on your computer">Link backup</button>
       <button id="btnExport" title="Download a backup file">Export</button>
       <button id="btnImport" title="Load a backup file">Import</button>
@@ -344,12 +353,46 @@ From: Marketing"></textarea>
   </div>
 </div>
 
+<!-- github sync modal -->
+<div class="modal-bg" id="syncBg">
+  <div class="modal" style="max-width:560px">
+    <h3>Sync across devices</h3>
+    <p>Keep your follow-ups in a file in your own <b>private</b> GitHub repo, so this desktop and your phone stay in sync. Enter the same details on each device.</p>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <label style="font-size:12px;color:var(--ink-soft)">Private repo (owner/name)
+        <input id="syncRepo" class="rin" placeholder="yourname/emailtodo-data" style="width:100%;margin-top:4px"/></label>
+      <label style="font-size:12px;color:var(--ink-soft)">File path
+        <input id="syncPath" class="rin" placeholder="followups.json" style="width:100%;margin-top:4px"/></label>
+      <label style="font-size:12px;color:var(--ink-soft)">Fine-grained token (Contents: Read &amp; write, that repo only)
+        <input id="syncToken" class="rin" type="password" placeholder="github_pat_…" style="width:100%;margin-top:4px"/></label>
+    </div>
+    <div id="syncMsg" style="font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;margin-top:10px;min-height:16px;color:var(--ink-soft)"></div>
+    <details style="margin-top:10px;font-family:ui-sans-serif,system-ui,sans-serif;font-size:12.5px;color:var(--ink-soft)">
+      <summary style="cursor:pointer;color:var(--accent)">How to set this up</summary>
+      <ol style="margin:8px 0 0 18px;padding:0;line-height:1.6">
+        <li>On GitHub, create a new <b>private</b> repository (e.g. <code>emailtodo-data</code>).</li>
+        <li>Go to <b>Settings → Developer settings → Fine-grained tokens → Generate new token</b>.</li>
+        <li>Limit it to <b>only that repo</b>, give it <b>Repository permissions → Contents: Read and write</b>.</li>
+        <li>Paste the repo, a file name, and the token above, then <b>Connect</b>.</li>
+        <li>Repeat with the same three values on your phone.</li>
+      </ol>
+      <p style="margin-top:8px">The token is stored only in this browser. Email bodies stay out of sync; the “Open in app” file also stays on the device you dragged it on.</p>
+    </details>
+    <div class="row">
+      <button class="btn" id="syncDisconnect" style="margin-right:auto;display:none">Disconnect</button>
+      <button class="btn" id="syncClose">Close</button>
+      <button class="btn primary" id="syncConnect">Connect &amp; sync</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.8.0";
 const CHANGELOG = {
+  "1.8.0": "Sync across devices via your own private GitHub repo; drop emails anywhere in the window",
   "1.7.0": "Open a dragged email in your desktop Outlook app (alongside Open on the web)",
   "1.6.2": "Fix .msg reading (library now loads correctly); add app icon + manifest",
   "1.6.1": "More reliable .msg reading — pull body and Cc from classic Outlook emails",
@@ -546,7 +589,8 @@ function makeTask({subject, sender, date, webLink, cc, to, body}){
     date: date || null,
     webLink: webLink || null,
     done: false,
-    added: Date.now()
+    added: Date.now(),
+    updated: Date.now()
   };
   const hay = `${subj}\n${t.body}`;
   t.po = extractPO(hay);
@@ -571,7 +615,7 @@ async function addTasks(arr){
   scheduleAutosave();
   toast(`Added ${arr.length} email${arr.length>1?"s":""}`);
 }
-async function persist(t){ await db.tasks.put(t); scheduleAutosave(); }
+async function persist(t){ t.updated = Date.now(); await db.tasks.put(t); scheduleAutosave(); }
 
 // ---------- backup: export / import / auto-save ----------
 let fileHandle = null;      // File System Access handle when linked
@@ -586,9 +630,14 @@ function buildBackup(){
 
 async function applyBackup(obj){
   if(!obj || !Array.isArray(obj.tasks)) throw new Error("Not a Follow-Ups backup");
-  // merge by id — imported items win, existing kept
+  // merge by id, keeping whichever copy was updated most recently (so edits
+  // and deletions from another device win over stale local copies)
   const byId = new Map(state.tasks.map(t=>[t.id,t]));
-  for(const t of obj.tasks){ if(t && t.id) byId.set(t.id, t); }
+  for(const t of obj.tasks){
+    if(!t || !t.id) continue;
+    const cur = byId.get(t.id);
+    if(!cur || (t.updated||t.added||0) >= (cur.updated||cur.added||0)) byId.set(t.id, t);
+  }
   state.tasks = [...byId.values()];
   if(obj.colors) projectColors = {...projectColors, ...obj.colors};
   if(Array.isArray(obj.rules)) rules = obj.rules;
@@ -652,6 +701,7 @@ async function writeToFile(){
 }
 
 function scheduleAutosave(){
+  scheduleSync();                 // sync to GitHub too, when configured
   if(!fileHandle) return;
   clearTimeout(autosaveT);
   autosaveT = setTimeout(writeToFile, 600);
@@ -668,6 +718,120 @@ document.getElementById("btnExport").addEventListener("click", exportDownload);
 document.getElementById("btnImport").addEventListener("click", ()=>document.getElementById("importFile").click());
 document.getElementById("btnLink").addEventListener("click", linkBackupFile);
 if(!canAutosave){ document.getElementById("btnLink").style.display="none"; }
+
+// ---------- cross-device sync via a private GitHub repo ----------
+let syncCfg = null;            // { repo, path, token, sha }
+let _syncing = false, _syncTimer = null, _syncQueued = false;
+
+async function loadSyncCfg(){ const c = await db.meta.get("githubSync"); syncCfg = c ? c.val : null; }
+async function saveSyncCfg(){ await db.meta.put({ key:"githubSync", val: syncCfg }); }
+
+const b64encode = str => btoa(unescape(encodeURIComponent(str)));
+const b64decode = b64 => decodeURIComponent(escape(atob((b64||"").replace(/\s+/g,""))));
+
+async function ghFetch(method, body){
+  const url = `https://api.github.com/repos/${syncCfg.repo}/contents/${syncCfg.path}`;
+  return fetch(url, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${syncCfg.token}`,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      ...(body ? {"Content-Type":"application/json"} : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+}
+async function ghGetFile(){
+  const res = await ghFetch("GET");
+  if(res.status === 404) return { obj:null, sha:null };
+  if(!res.ok) throw new Error(await ghErr(res));
+  const j = await res.json();
+  let obj = null;
+  try{ obj = JSON.parse(b64decode(j.content)); }catch(e){ obj = null; }
+  return { obj, sha: j.sha };
+}
+async function ghPutFile(text, sha){
+  const res = await ghFetch("PUT", {
+    message: "Follow-Ups sync",
+    content: b64encode(text),
+    sha: sha || undefined
+  });
+  if(!res.ok) throw new Error(await ghErr(res));
+  return (await res.json()).content.sha;
+}
+async function ghErr(res){
+  let d = ""; try{ d = (await res.json()).message; }catch(e){}
+  return `${res.status}${d?" "+d:""}`;
+}
+
+function syncConfigured(){ return !!(syncCfg && syncCfg.repo && syncCfg.token && syncCfg.path); }
+function scheduleSync(){
+  if(!syncConfigured()) return;
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(()=>syncNow(), 1500);
+}
+async function syncNow(){
+  if(!syncConfigured()) return;
+  if(_syncing){ _syncQueued = true; return; }
+  _syncing = true;
+  setBackupStatus("Syncing…");
+  try{
+    for(let attempt=0; attempt<2; attempt++){
+      const { obj, sha } = await ghGetFile();
+      if(obj) await applyBackup(obj);          // merge remote → local (by recency)
+      try{
+        syncCfg.sha = await ghPutFile(buildBackup(), sha);
+        await saveSyncCfg();
+        setBackupStatus(`Synced · ${new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"})}`);
+        break;
+      }catch(e){
+        if(/^409/.test(e.message) && attempt===0) continue;   // someone else wrote → re-pull & retry
+        throw e;
+      }
+    }
+  }catch(e){
+    setBackupStatus("Sync error: "+e.message+" — check repo/token", true);
+  }finally{
+    _syncing = false;
+    if(_syncQueued){ _syncQueued = false; scheduleSync(); }
+  }
+}
+
+// sync modal wiring
+const syncBg = document.getElementById("syncBg");
+function openSync(){
+  document.getElementById("syncRepo").value  = syncCfg?.repo  || "";
+  document.getElementById("syncPath").value  = syncCfg?.path  || "followups.json";
+  document.getElementById("syncToken").value = syncCfg?.token || "";
+  document.getElementById("syncMsg").textContent = syncConfigured() ? "Connected." : "";
+  document.getElementById("syncDisconnect").style.display = syncConfigured() ? "inline-block" : "none";
+  syncBg.classList.add("show");
+}
+document.getElementById("btnSync").addEventListener("click", openSync);
+document.getElementById("syncClose").addEventListener("click", ()=>syncBg.classList.remove("show"));
+syncBg.addEventListener("click", e=>{ if(e.target===syncBg) syncBg.classList.remove("show"); });
+document.getElementById("syncDisconnect").addEventListener("click", async ()=>{
+  syncCfg = null; await saveSyncCfg();
+  document.getElementById("syncMsg").textContent = "Disconnected on this device.";
+  document.getElementById("syncDisconnect").style.display = "none";
+  setBackupStatus("Sync off");
+});
+document.getElementById("syncConnect").addEventListener("click", async ()=>{
+  const repo  = document.getElementById("syncRepo").value.trim().replace(/^https?:\/\/github\.com\//,"").replace(/\.git$/,"");
+  const path  = document.getElementById("syncPath").value.trim() || "followups.json";
+  const token = document.getElementById("syncToken").value.trim();
+  const msg = document.getElementById("syncMsg");
+  if(!/^[^/]+\/[^/]+$/.test(repo)){ msg.textContent = "Repo should look like owner/name."; return; }
+  if(!token){ msg.textContent = "Paste a token."; return; }
+  syncCfg = { repo, path, token, sha:null };
+  msg.textContent = "Connecting…";
+  await saveSyncCfg();
+  await syncNow();
+  const el = document.getElementById("backupStatus");
+  msg.textContent = el && el.textContent.includes("error") ? el.textContent : "Connected — syncing is on.";
+  document.getElementById("syncDisconnect").style.display = "inline-block";
+});
 
 // ---------- parse pasted / dropped email text ----------
 // Split a blob of text into one chunk per email, using the most reliable
@@ -890,6 +1054,7 @@ function render(){
   const list = document.getElementById("list");
   const q = state.q.toLowerCase();
   let items = state.tasks.filter(t=>{
+    if(t.deleted) return false;
     if(state.filter==="open" && t.done) return false;
     if(state.filter==="done" && !t.done) return false;
     if(q){
@@ -902,8 +1067,8 @@ function render(){
   });
 
   // count
-  const open = state.tasks.filter(t=>!t.done).length;
-  const done = state.tasks.filter(t=>t.done).length;
+  const open = state.tasks.filter(t=>!t.deleted && !t.done).length;
+  const done = state.tasks.filter(t=>!t.deleted && t.done).length;
   document.getElementById("count").innerHTML = state.tasks.length
     ? `<b>${open}</b> to do · ${done} done` : "Nothing yet";
 
@@ -973,11 +1138,18 @@ function esc(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">"
 
 // ---------- events ----------
 const drop = document.getElementById("drop");
-["dragenter","dragover"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add("hot");}));
-["dragleave","drop"].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();if(e!=="drop")drop.classList.remove("hot");}));
-drop.addEventListener("drop", async ev=>{
-  ev.preventDefault(); drop.classList.remove("hot");
+// Accept drops ANYWHERE in the window, not just on the drop zone.
+function setDragActive(on){ document.body.classList.toggle("dragging", on); drop.classList.toggle("hot", on); }
+let _dragDepth = 0;
+window.addEventListener("dragenter", ev=>{ if(ev.dataTransfer && [...ev.dataTransfer.types].some(t=>t!=="")){ ev.preventDefault(); _dragDepth++; setDragActive(true); } });
+window.addEventListener("dragover",  ev=>{ ev.preventDefault(); });
+window.addEventListener("dragleave", ev=>{ ev.preventDefault(); _dragDepth=Math.max(0,_dragDepth-1); if(_dragDepth===0) setDragActive(false); });
+window.addEventListener("drop", handleDrop);
+
+async function handleDrop(ev){
+  ev.preventDefault(); _dragDepth=0; setDragActive(false);
   const dt = ev.dataTransfer;
+  if(!dt) return;
 
   // Read every string payload synchronously — dataTransfer is emptied after
   // the first await, and new Outlook may put the email under any of these.
@@ -1035,7 +1207,7 @@ drop.addEventListener("drop", async ev=>{
   // truly nothing usable — log what was offered so it can be diagnosed
   console.warn("Follow-Ups: nothing parseable in drop. types =", dt.types, data);
   toast("Couldn't read that drop — try the paste option instead");
-});
+}
 drop.addEventListener("click", e=>{ if(e.target.id!=="pasteOpen") openPaste(); });
 
 // paste modal
@@ -1159,8 +1331,12 @@ document.getElementById("list").addEventListener("click", async e=>{
   const del = e.target.closest("[data-del]");
   if(del){
     const id = del.dataset.del;
-    state.tasks = state.tasks.filter(x=>x.id!==id);
-    await db.tasks.delete(id);
+    const t = state.tasks.find(x=>x.id===id);
+    if(t){
+      // tombstone (so the deletion syncs to other devices) rather than a hard delete
+      t.deleted = true; t.updated = Date.now();
+      await db.tasks.put(t);
+    }
     try{ await db.files.delete(id); }catch(err){}
     render(); scheduleAutosave(); return;
   }
@@ -1210,6 +1386,7 @@ try{ loadMsgReader(); }catch(e){}
     const c = await db.meta.get("colors");
     if(c) projectColors = c.val || {};
     rules = (await db.rules.toArray()) || [];
+    await loadSyncCfg();
     // backfill PO / tracking on emails added before this feature existed
     for(const t of state.tasks){
       if(t.po===undefined && t.tracking===undefined){
@@ -1221,6 +1398,15 @@ try{ loadMsgReader(); }catch(e){}
     }
   }catch(e){ console.warn(e); }
   render();
+  // pull any changes made on another device, then keep in sync
+  if(syncConfigured()){
+    syncNow();
+    // re-pull when returning to the tab (e.g. after editing on your phone)
+    let lastPull = Date.now();
+    document.addEventListener("visibilitychange", ()=>{
+      if(document.visibilityState==="visible" && Date.now()-lastPull > 8000){ lastPull = Date.now(); syncNow(); }
+    });
+  }
 })();
 </script>
 </body>
