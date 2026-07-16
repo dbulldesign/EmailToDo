@@ -10,9 +10,10 @@
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Follow-Ups" />
-<link rel="apple-touch-icon" href="icon-180.png" />
+<link rel="apple-touch-icon" href="icon.svg" />
+<link rel="icon" href="icon.svg" type="image/svg+xml" />
 <script src="https://cdnjs.cloudflare.com/ajax/libs/dexie/3.2.4/dexie.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@kenjiuno/msgreader@1.22.0/lib/index.browser.js"></script>
+<!-- msgreader is loaded lazily on the first .msg drop (see loadMsgReader) -->
 <style>
   :root{
     --ink:#1c2230;
@@ -344,8 +345,9 @@ From: Marketing"></textarea>
 // ---------- version ----------
 // Bump APP_VERSION on every meaningful change and add a CHANGELOG line.
 // The number shows in the header (hover it to see what's in the release).
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.2";
 const CHANGELOG = {
+  "1.6.2": "Fix .msg reading (library now loads correctly); add app icon + manifest",
   "1.6.1": "More reliable .msg reading — pull body and Cc from classic Outlook emails",
   "1.6.0": "Preview an email's body inline, and tag every From + Cc person",
   "1.5.0": "Tag people from From/Cc for one-click search; clearer help when new Outlook drags aren't readable",
@@ -763,9 +765,35 @@ function parsePeople(str){
 }
 
 // ---------- parse .msg ----------
+// The msgreader build doesn't reliably expose a global (and its name varies),
+// so resolve the class from any known global, else lazy-load it as an ES module.
+let _msgReaderPromise = null;
+function loadMsgReader(){
+  if(_msgReaderPromise) return _msgReaderPromise;
+  const pre = window.MSGReader || window.MsgReader || window.msgReader;
+  if(typeof pre === "function"){ _msgReaderPromise = Promise.resolve(pre); return _msgReaderPromise; }
+  const urls = [
+    "https://cdn.jsdelivr.net/npm/@kenjiuno/msgreader@1.22.0/+esm",
+    "https://esm.sh/@kenjiuno/msgreader@1.22.0"
+  ];
+  _msgReaderPromise = (async ()=>{
+    for(const u of urls){
+      try{
+        const m = await import(u);
+        const c = m.default || m.MsgReader || m.MSGReader;
+        if(typeof c === "function") return c;
+      }catch(e){ console.warn("Follow-Ups: msgreader load failed from", u, e); }
+    }
+    return null;
+  })();
+  return _msgReaderPromise;
+}
+
 async function parseMsgFile(file){
+  const MR = await loadMsgReader();
+  if(typeof MR !== "function") throw new Error("msgreader library unavailable");
   const buf = await file.arrayBuffer();
-  const reader = new MSGReader(buf);
+  const reader = new MR(buf);
   const d = reader.getFileData() || {};
   // diagnostic: expose the raw fields so shape issues can be inspected
   try{ window.__lastMsg = d; console.debug("Follow-Ups .msg fields:", Object.keys(d), "recipient[0]:", (d.recipients||[])[0], "hasBody:", !!d.body, "hasHtml:", !!(d.bodyHTML||d.bodyHtml)); }catch(e){}
@@ -1131,6 +1159,8 @@ async function saveColors(){ await db.meta.put({key:"colors", val:projectColors}
   el.textContent = "v" + APP_VERSION;
   el.title = CHANGELOG[APP_VERSION] ? `v${APP_VERSION} — ${CHANGELOG[APP_VERSION]}` : `v${APP_VERSION}`;
 })();
+// warm up the .msg reader so the first drop is instant (ignore failures)
+try{ loadMsgReader(); }catch(e){}
 (async ()=>{
   try{
     const saved = await db.tasks.toArray();
